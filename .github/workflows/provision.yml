@@ -40,11 +40,13 @@ jobs:
       OCPUS: "1"
       MEMORY_GB: "12"
       MAX_RETRIES: "1"
-      INITIAL_BACKOFF: "30"
+      INITIAL_BACKOFF: "1"
       MAX_BACKOFF: "120"
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
 
       - name: Write OCI credentials
         run: |
