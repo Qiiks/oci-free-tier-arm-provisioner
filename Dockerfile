@@ -4,6 +4,8 @@
 # ============================================================
 FROM rust:1-slim AS builder
 
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/*
+
 RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
