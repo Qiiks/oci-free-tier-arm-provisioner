@@ -31,3 +31,22 @@ jobs:
             git commit -m "build: commit Linux release binary"
             git push
           fi
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Docker image
+        run: docker build -t oci-provisioner:test .
+
+      - name: Smoke test — must fail fast without credentials
+        run: |
+          set +e
+          out=$(docker run --rm oci-provisioner:test 2>&1)
+          code=$?
+          set -e
+          echo "exit=$code"
+          echo "$out"
+          [ "$code" -eq 1 ] || { echo "FAIL: expected exit 1 without credentials"; exit 1; }
+          [ -n "$out" ] || { echo "FAIL: expected an error message on stderr/stdout"; exit 1; }
