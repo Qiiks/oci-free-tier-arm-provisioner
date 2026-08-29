@@ -14,7 +14,14 @@ use sha2::{Digest, Sha256};
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
-const SHAPE: &str = "VM.Standard.A1.Flex";
+fn env_shape() -> String {
+    let s = std::env::var("SHAPE").unwrap_or_else(|_| "arm".to_string()).to_lowercase();
+    match s.as_str() {
+        "micro" | "e2.1.micro" | "vm.standard.e2.1.micro" => "VM.Standard.E2.1.Micro".to_string(),
+        _ => "VM.Standard.A1.Flex".to_string(),
+    }
+}
+
 const API_VERSION: &str = "20160918";
 const UA: &str = "oci-free-tier-arm/1.0";
 
@@ -755,13 +762,13 @@ fn get_latest_image(
     compartment: &str,
     os_name: &str,
     os_version: &str,
+    shape: &str,
 ) -> Result<serde_json::Value, ApiError> {
-    log(&format!("Discovering latest {} {} ARM image...", os_name, os_version));
+    log(&format!("Discovering latest {} {} image for {}...", os_name, os_version, shape));
     let mut query = vec![
         ("compartmentId", compartment),
         ("operatingSystem", os_name),
-        ("operatingSystemVersion", os_version),
-        ("shape", SHAPE),
+        ("shape", shape),
         ("sortBy", "TIMECREATED"),
         ("sortOrder", "DESC"),
     ];
@@ -780,8 +787,7 @@ fn get_latest_image(
         warn(&format!("No {} {} image found, trying any {} version...", os_name, os_version, os_name));
         query = vec![
             ("compartmentId", compartment),
-            ("operatingSystem", os_name),
-            ("shape", SHAPE),
+            ("shape", shape),
             ("sortBy", "TIMECREATED"),
             ("sortOrder", "DESC"),
         ];
@@ -800,7 +806,7 @@ fn get_latest_image(
     let image = arr.into_iter().next().ok_or_else(|| {
         ApiError::Other(format!(
             "No {} images found for shape {}. Try setting OS_NAME / OS_VERSION.",
-            os_name, SHAPE
+            os_name, shape
         ))
     })?;
     log(&format!("Found image: {}", get_str(&image, "displayName").unwrap_or_default()));
@@ -849,6 +855,7 @@ fn launch_instance(
     subnet_id: &str,
     ssh_pub_key: &str,
     display_name: &str,
+    shape: &str,
     ocpus: f64,
     memory_gb: f64,
     boot_volume_gb: i64,
@@ -858,15 +865,11 @@ fn launch_instance(
         "{:x}",
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
     );
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "displayName": display_name,
         "compartmentId": compartment,
         "availabilityDomain": ad,
-        "shape": SHAPE,
-        "shapeConfig": {
-            "ocpus": ocpus,
-            "memoryInGBs": memory_gb,
-        },
+        "shape": shape,
         "sourceDetails": {
             "sourceType": "image",
             "imageId": image_id,
@@ -879,7 +882,14 @@ fn launch_instance(
         "metadata": {
             "ssh_authorized_keys": ssh_pub_key,
         },
+        "agentConfig": { "pluginsConfig": [ { "name": "Compute Instance Monitoring", "state": "DISABLED" }, { "name": "Compute Instance Run Command", "state": "DISABLED" } ] },
     });
+    if shape != "VM.Standard.E2.1.Micro" {
+        body["shapeConfig"] = serde_json::json!({
+            "ocpus": ocpus,
+            "memoryInGBs": memory_gb,
+        });
+    }
 
     make_request(
         signer,
@@ -981,9 +991,10 @@ fn main() {
     let memory_gb = env_f64("MEMORY_GB", 12.0).min(MAX_MEMORY_GB);
     let display_name = env_str("DISPLAY_NAME", "free-arm");
     let ssh_key_file = expand_home(&env_str("SSH_KEY_FILE", "~/.ssh/id_rsa"));
-    let boot_volume_gb = env_i64("BOOT_VOLUME_SIZE_GB", 50).max(50);
+    let shape = env_shape();
     let os_name = env_str("OS_NAME", "Canonical Ubuntu");
     let os_version = env_str("OS_VERSION", "22.04");
+    let boot_volume_gb = env_i64("BOOT_VOLUME_SIZE_GB", 50).max(50);
     let assign_public_ip = env_bool("ASSIGN_PUBLIC_IP", true);
     let initial_backoff = env_i64("INITIAL_BACKOFF", 30);
     let max_backoff = env_i64("MAX_BACKOFF", 300);
@@ -996,9 +1007,11 @@ fn main() {
     log("============================================================");
     log("OCI Free Tier ARM Instance Auto-Provisioner");
     log("============================================================");
-    log(&format!("Shape:        {}", SHAPE));
-    log(&format!("OCPUs:        {} (max {})", ocpus, MAX_OCPUS));
-    log(&format!("Memory:       {} GB (max {})", memory_gb, MAX_MEMORY_GB));
+    log(&format!("Shape:        {}", shape));
+    if shape != "VM.Standard.E2.1.Micro" {
+        log(&format!("OCPUs:        {} (max {})", ocpus, MAX_OCPUS));
+        log(&format!("Memory:       {} GB (max {})", memory_gb, MAX_MEMORY_GB));
+    }
     log(&format!("Display name: {}", display_name));
     log(&format!("OS:           {} {}", os_name, os_version));
     log(&format!("Boot volume:  {} GB", boot_volume_gb));
@@ -1074,7 +1087,7 @@ fn main() {
     };
     let subnet_id = get_str(&subnet, "id").unwrap_or_default();
 
-    let image = match get_latest_image(&signer, &iaas_host, &compartment, &os_name, &os_version) {
+    let image = match get_latest_image(&signer, &iaas_host, &compartment, &os_name, &os_version, &shape) {
         Ok(i) => i,
         Err(e) => {
             error(&format!("Failed to discover image: {}", e.message()));
@@ -1112,14 +1125,10 @@ fn main() {
     if dry_run {
         log("");
         log("DRY RUN — would launch with:");
-        log(&format!("  AD:          {}", ads.first().map(|s| s.as_str()).unwrap_or("")));
-        log(&format!("  Subnet:      {}", subnet_id));
-        log(&format!(
-            "  Image:       {} ({})",
-            image_id,
-            get_str(&image, "displayName").unwrap_or_default()
-        ));
-        log(&format!("  Shape:       {} ({} OCPU, {} GB)", SHAPE, ocpus, memory_gb));
+        log(&format!("  Shape:       {}", shape));
+        if shape != "VM.Standard.E2.1.Micro" {
+            log(&format!("  Config:      {} OCPU, {} GB", ocpus, memory_gb));
+        }
         log(&format!("  SSH key:     {}...", &ssh_pub_key[..ssh_pub_key.len().min(40)]));
         return;
     }
@@ -1148,6 +1157,7 @@ fn main() {
             &subnet_id,
             &ssh_pub_key,
             &display_name,
+            &shape,
             ocpus,
             memory_gb,
             boot_volume_gb,
