@@ -82,3 +82,51 @@ Validates config + discovery without launching anything.
   the binary trims it, so either a console-downloaded key or a `oci setup config`
   key works.
 - The build is a single static `target/release/oci-free-tier-arm.exe` (~1.5 MB).
+
+## Docker / Coolify
+
+The container is a multi-stage musl static build shipped in a `scratch` image
+(~2 MB, no shell, no libc, nothing to patch). TLS roots are compiled in.
+
+All credentials come from env — no config file, no key file, no ssh-keygen:
+
+| Env | Meaning |
+|---|---|
+| `OCI_CLI_USER` / `OCI_CLI_TENANCY` / `OCI_CLI_REGION` / `OCI_CLI_FINGERPRINT` | Same values as `~/.oci/config` |
+| `OCI_CLI_KEY_CONTENT` | Full PEM body of the private key (newlines included) |
+| `SSH_PUBLIC_KEY` | Content of your `id_rsa.pub` |
+| `SLEEP_AFTER_SUCCESS` | Seconds to sleep after success so the container stays up (default 0 = exit) |
+
+### Coolify (recommended)
+
+1. Push this repo (or import it from your fork).
+2. In Coolify: **New Resource → Docker Compose**, point it at `docker-compose.yml`.
+3. In the env editor set: `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_REGION`,
+   `OCI_CLI_FINGERPRINT`, `OCI_CLI_KEY_CONTENT`, `SSH_PUBLIC_KEY`,
+   `DISCORD_WEBHOOK_URL`.
+4. Deploy. The container loops forever — on success it posts the green Discord
+   embed, prints the IP, then sleeps (see `SLEEP_AFTER_SUCCESS`).
+
+### Plain docker
+
+```bash
+docker build -t oci-provisioner .
+docker run -d --name oci-provisioner --restart unless-stopped \
+  -e OCI_CLI_USER=ocid1.user.oc1..xxx \
+  -e OCI_CLI_TENANCY=ocid1.tenancy.oc1..xxx \
+  -e OCI_CLI_REGION=ap-kulai-2 \
+  -e OCI_CLI_FINGERPRINT=aa:bb:... \
+  -e OCI_CLI_KEY_CONTENT="$(cat ~/.oci/key.pem)" \
+  -e SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)" \
+  -e DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... \
+  oci-provisioner
+```
+
+Local env-mode works identically (`OCI_CLI_*` env vars take priority over
+`~/.oci/config`), so you can dry-run the container config without Docker:
+
+```cmd
+set OCI_CLI_USER=...
+set DRY_RUN=true
+target\release\oci-free-tier-arm.exe
+```

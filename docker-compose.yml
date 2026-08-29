@@ -1,0 +1,40 @@
+# ============================================================
+# OCI Free Tier ARM provisioner — Coolify / docker-compose
+# All secrets go in Coolify's env editor (or your .env), never committed.
+# ============================================================
+services:
+  provisioner:
+    build: .
+    image: oci-free-tier-arm:latest
+    container_name: oci-provisioner
+    restart: unless-stopped
+    environment:
+      # ── OCI credentials (required) ──────────────────────────
+      OCI_CLI_USER: ${OCI_CLI_USER}
+      OCI_CLI_TENANCY: ${OCI_CLI_TENANCY}
+      OCI_CLI_REGION: ${OCI_CLI_REGION}
+      OCI_CLI_FINGERPRINT: ${OCI_CLI_FINGERPRINT}
+      OCI_CLI_KEY_CONTENT: ${OCI_CLI_KEY_CONTENT}     # full PEM body incl. newlines
+
+      # ── SSH public key (required) ───────────────────────────
+      SSH_PUBLIC_KEY: ${SSH_PUBLIC_KEY}               # content of id_rsa.pub
+
+      # ── Target instance ─────────────────────────────────────
+      DISPLAY_NAME: free-arm
+      OCPUS: "1"            # A1.Flex free cap: 2
+      MEMORY_GB: "12"       # A1.Flex free cap: 12
+      OS_NAME: "Canonical Ubuntu"
+      OS_VERSION: "22.04"
+      BOOT_VOLUME_SIZE_GB: "50"
+
+      # ── Retry behaviour (container IS the loop) ─────────────
+      MAX_RETRIES: "0"          # 0 = unlimited
+      INITIAL_BACKOFF: "30"
+      MAX_BACKOFF: "150"
+
+      # ── Notifications ───────────────────────────────────────
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+
+      # Keep the container alive after success (Coolify restarts on exit 0
+      # would relaunch and re-notify; sleeping forever avoids that).
+      SLEEP_AFTER_SUCCESS: "31536000"   # 1 year

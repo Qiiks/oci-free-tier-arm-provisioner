@@ -95,6 +95,32 @@ struct OciConfig {
 }
 
 fn load_config() -> Result<OciConfig, String> {
+    // Container mode: full config from env (OCI_CLI_*), no config file.
+    let env_user = std::env::var("OCI_CLI_USER").unwrap_or_default();
+    if !env_user.is_empty() {
+        let cfg = OciConfig {
+            user: env_user,
+            fingerprint: std::env::var("OCI_CLI_FINGERPRINT").unwrap_or_default(),
+            key_file: String::new(), // key comes from OCI_CLI_KEY_CONTENT
+            tenancy: std::env::var("OCI_CLI_TENANCY").unwrap_or_default(),
+            region: std::env::var("OCI_CLI_REGION").unwrap_or_default(),
+        };
+        if std::env::var("OCI_CLI_KEY_CONTENT").unwrap_or_default().is_empty() {
+            return Err("OCI_CLI_KEY_CONTENT is required when using OCI_CLI_* env config".into());
+        }
+        for (name, val) in [
+            ("user", &cfg.user),
+            ("fingerprint", &cfg.fingerprint),
+            ("tenancy", &cfg.tenancy),
+            ("region", &cfg.region),
+        ] {
+            if val.is_empty() {
+                return Err(format!("OCI config missing required field '{name}'"));
+            }
+        }
+        return Ok(cfg);
+    }
+
     let config_path = expand_home(&env_str("OCI_CONFIG_FILE", "~/.oci/config"));
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("OCI config not found at {}: {}\nRun: oci setup config", config_path, e))?;
@@ -160,8 +186,11 @@ struct SignedRequest {
 
 impl OciSigner {
     fn new(cfg: &OciConfig) -> Result<Self, String> {
-        let pem = std::fs::read_to_string(&cfg.key_file)
-            .map_err(|e| format!("cannot read key file {}: {}", cfg.key_file, e))?;
+        let pem = match std::env::var("OCI_CLI_KEY_CONTENT") {
+            Ok(content) if !content.is_empty() => content,
+            _ => std::fs::read_to_string(&cfg.key_file)
+                .map_err(|e| format!("cannot read key file {}: {}", cfg.key_file, e))?,
+        };
         // The OCI console appends trailing text (e.g. "OCI_API_KEY") after the
         // END marker; strict PEM parsers reject that. Trim to the END line.
         let pem = pem.trim_start_matches('\u{feff}');
@@ -173,9 +202,14 @@ impl OciSigner {
             }
             None => pem,
         };
+        let key_src = if cfg.key_file.is_empty() {
+            " (from OCI_CLI_KEY_CONTENT)".to_string()
+        } else {
+            format!(" {}", cfg.key_file)
+        };
         let key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
             .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(pem))
-            .map_err(|e| format!("cannot parse private key {}: {}", cfg.key_file, e))?;
+            .map_err(|e| format!("cannot parse private key{}: {}", key_src, e))?;
         let signing_key = SigningKey::<Sha256>::new(key);
         Ok(OciSigner {
             tenancy: cfg.tenancy.clone(),
@@ -409,7 +443,11 @@ fn make_request(
         serde_json::from_str(&text).map_err(|e| ApiError::Other(format!("invalid JSON from OCI: {}", e)))
     } else {
         let message = extract_message(&text);
-        Err(ApiError::Http { status, message })
+        if message.is_empty() {
+            Err(ApiError::Http { status, message: format!("raw body: {}", &text[..text.len().min(500)]) })
+        } else {
+            Err(ApiError::Http { status, message })
+        }
     }
 }
 
@@ -420,6 +458,13 @@ fn get_str(v: &serde_json::Value, key: &str) -> Option<String> {
 // ─── SSH key ───────────────────────────────────────────────────────────────
 
 fn ensure_ssh_key(key_file: &Path) -> Result<String, String> {
+    // Container mode: public key supplied directly via env.
+    if let Ok(k) = std::env::var("SSH_PUBLIC_KEY") {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            return Ok(k);
+        }
+    }
     let pub_file = PathBuf::from(format!("{}.pub", key_file.display()));
     if pub_file.exists() {
         return std::fs::read_to_string(&pub_file)
@@ -882,7 +927,7 @@ fn launch_instance(
         "metadata": {
             "ssh_authorized_keys": ssh_pub_key,
         },
-        "agentConfig": { "pluginsConfig": [ { "name": "Compute Instance Monitoring", "state": "DISABLED" }, { "name": "Compute Instance Run Command", "state": "DISABLED" } ] },
+        "agentConfig": { "pluginsConfig": [ { "name": "Compute Instance Monitoring", "desiredState": "DISABLED" }, { "name": "Compute Instance Run Command", "desiredState": "DISABLED" } ] },
     });
     if shape != "VM.Standard.E2.1.Micro" {
         body["shapeConfig"] = serde_json::json!({
@@ -996,11 +1041,12 @@ fn main() {
     let os_version = env_str("OS_VERSION", "22.04");
     let boot_volume_gb = env_i64("BOOT_VOLUME_SIZE_GB", 50).max(50);
     let assign_public_ip = env_bool("ASSIGN_PUBLIC_IP", true);
+    let dry_run = env_bool("DRY_RUN", false);
+    let sleep_after_success = env_i64("SLEEP_AFTER_SUCCESS", 0);
     let initial_backoff = env_i64("INITIAL_BACKOFF", 30);
     let max_backoff = env_i64("MAX_BACKOFF", 300);
     let max_retries = env_i64("MAX_RETRIES", 0);
     let discord_webhook = env_str("DISCORD_WEBHOOK_URL", "");
-    let dry_run = env_bool("DRY_RUN", false);
     let vcn_cidr = env_str("VCN_CIDR", "10.0.0.0/16");
     let subnet_cidr = env_str("SUBNET_CIDR", "10.0.0.0/24");
 
@@ -1119,6 +1165,10 @@ fn main() {
             true,
             &discord_webhook,
         );
+        if sleep_after_success > 0 {
+            log(&format!("Sleeping {}s to keep container alive...", sleep_after_success));
+            sleep(Duration::from_secs(sleep_after_success as u64));
+        }
         return;
     }
 
@@ -1183,6 +1233,10 @@ fn main() {
                         }
                         log(&msg);
                         notify(&msg, true, &discord_webhook);
+                        if sleep_after_success > 0 {
+                            log(&format!("Sleeping {}s to keep container alive...", sleep_after_success));
+                            sleep(Duration::from_secs(sleep_after_success as u64));
+                        }
                         return;
                     }
                     Err(e) => {
