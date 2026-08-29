@@ -116,7 +116,7 @@ fn load_config() -> Result<OciConfig, String> {
     let cfg = OciConfig {
         user: get("user"),
         fingerprint: get("fingerprint"),
-        key_file: get("key_file"),
+        key_file: expand_home(&get("key_file")),
         tenancy: get("tenancy"),
         region: get("region"),
     };
