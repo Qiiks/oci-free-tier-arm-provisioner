@@ -1,0 +1,21 @@
+[package]
+name = "oci-free-tier-arm"
+version = "1.0.0"
+edition = "2021"
+description = "Auto-provision an Oracle Cloud Always Free ARM (VM.Standard.A1.Flex) instance"
+
+[dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+httpdate = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

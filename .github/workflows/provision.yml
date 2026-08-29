@@ -1,0 +1,108 @@
+# ============================================================
+# OCI Free Tier ARM Instance — GitHub Actions (Rust binary)
+# ============================================================
+# The cron schedule IS the retry loop: each fire does one bounded
+# launch attempt. On success the binary posts a green Discord embed
+# and exits 0, then this workflow disables itself so the cron stops.
+#
+# Required GitHub Secrets:
+#   OCI_CLI_USER          — User OCID
+#   OCI_CLI_TENANCY       — Tenancy OCID
+#   OCI_CLI_FINGERPRINT   — API key fingerprint
+#   OCI_CLI_KEY_CONTENT   — Private PEM (-----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----)
+#   OCI_CLI_REGION        — e.g. ap-kulai-2
+#   SSH_PUBLIC_KEY        — contents of ~/.ssh/id_rsa.pub
+# Optional:
+#   DISCORD_WEBHOOK_URL   — success/failure embed webhook
+# ============================================================
+
+name: Provision OCI Free ARM Instance
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    env:
+      DISPLAY_NAME: free-arm
+      OCPUS: "1"
+      MEMORY_GB: "12"
+      MAX_RETRIES: "1"
+      INITIAL_BACKOFF: "30"
+      MAX_BACKOFF: "120"
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Write OCI credentials
+        run: |
+          mkdir -p ~/.oci ~/.ssh
+          printf '%s' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_CLI_USER
+          tenancy=$OCI_CLI_TENANCY
+          fingerprint=$OCI_CLI_FINGERPRINT
+          key_file=~/.oci/oci_api_key.pem
+          region=$OCI_CLI_REGION
+          EOF
+          chmod 600 ~/.oci/config
+          printf '%s' "$SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+        env:
+          OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+          OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+          OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+          OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Attempt provision (one bounded launch)
+        id: provision
+        continue-on-error: true
+        run: |
+          set +e
+          ./target/release/oci-free-tier-arm 2>&1 | tee output.log
+          rc=${PIPESTATUS[0]}
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          # exit 0 => provisioned or already exists; exit 1 => still trying / hard error
+          if [ "$rc" -eq 0 ]; then
+            echo "provisioned=yes" >> "$GITHUB_OUTPUT"
+            echo "::notice::Instance provisioned — disabling cron."
+          else
+            echo "::notice::No capacity yet (exit $rc). Cron will retry. See output.log."
+          fi
+
+      - name: Stop cron once provisioned
+        if: steps.provision.outputs.provisioned == 'yes'
+        run: |
+          gh workflow disable "$GITHUB_WORKFLOW" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload log on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provision-log
+          path: output.log
+          if-no-files-found: ignore

@@ -1,0 +1,6 @@
+/target
+/__pycache__
+oci_free_tier_arm.py
+requirements.txt
+.env
+*.pem
