@@ -22,6 +22,7 @@ services:
       # ── Target instance ─────────────────────────────────────
       DISPLAY_NAME: free-arm
       OCPUS: "2"            # A1.Flex free cap: 2
+      MEMORY_GB: "12"       # A1.Flex free cap: 12
       OS_NAME: "Canonical Ubuntu"
       OS_VERSION: "22.04"
       BOOT_VOLUME_SIZE_GB: "50"
